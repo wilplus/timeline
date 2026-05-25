@@ -727,11 +727,12 @@
     }
     const desc = evDesc.value.trim();
     if (editingId) {
-      const ev = events.find(e => e.id === editingId);
+      const idToEdit = editingId;
+      const ev = events.find(e => e.id === idToEdit);
       if (ev) { ev.ts = date.getTime(); ev.title = title; ev.desc = desc; }
-      const wasSelected = selectedId === editingId;
+      const wasSelected = selectedId === idToEdit;
       closeModal();
-      if (wasSelected) selectEvent(events.find(e => e.id === editingId).id);
+      if (wasSelected) selectEvent(idToEdit);
     } else {
       const newEv = { id: nextId++, ts: date.getTime(), title, desc };
       events.push(newEv);
