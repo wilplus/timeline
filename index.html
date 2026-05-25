@@ -353,6 +353,16 @@
     draw();
   }
 
+  function focusOnToday() {
+    pxPerDay = 6;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayDay = (today - MIN_DATE) / MS_PER_DAY;
+    viewStart = todayDay - (W / pxPerDay) / 2;
+    clampView();
+    draw();
+  }
+
   function clampView() {
     if (pxPerDay < minPxPerDay) pxPerDay = minPxPerDay;
     if (pxPerDay > MAX_PX_PER_DAY) pxPerDay = MAX_PX_PER_DAY;
@@ -1247,7 +1257,7 @@
   // ===== Boot =====
   loadFromStorage();
   resize();
-  fitAll();
+  focusOnToday();
   updateSyncBtnState();
   if (syncCode) {
     whenFirebaseReady(() => connectSync(syncCode));
