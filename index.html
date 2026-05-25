@@ -41,6 +41,7 @@
   canvas#tl {
     position: absolute; top: 56px; left: 0;
     display: block; cursor: grab;
+    touch-action: none;
   }
   canvas#tl.dragging { cursor: grabbing; }
 
@@ -122,7 +123,13 @@
 
   @media (max-width: 600px) {
     #detail { width: 100%; }
-    #hint { font-size: 10px; }
+    #hint { font-size: 10px; padding: 5px 8px; }
+    #toolbar { padding: 0 10px; gap: 6px; }
+    #toolbar h1 { display: none; }
+    #toolbar button { padding: 7px 10px; font-size: 12px; }
+    #toolbar #zoomLabel { font-size: 11px; padding: 4px 8px; }
+    .modal { padding: 18px; }
+    .modal button { padding: 9px 14px; }
   }
 </style>
 </head>
@@ -141,7 +148,7 @@
 
 <canvas id="tl"></canvas>
 
-<div id="hint">Drag to pan · Scroll to zoom · Double-click to add · Click event to view</div>
+<div id="hint">Drag to pan · Scroll or pinch to zoom · Double-tap empty area to add · Tap event to view</div>
 
 <div class="modal-bg" id="modalBg">
   <div class="modal">
@@ -592,81 +599,164 @@
     return (days / 365.25).toFixed(1).replace(/\.0$/, '') + ' years';
   }
 
-  // ===== Interaction =====
-  let dragging = false, dragMoved = false;
-  let dragStartX = 0, dragStartView = 0;
+  // ===== Interaction (pointer events: mouse + touch + pen) =====
+  const pointers = new Map(); // pointerId -> { x, y }
+  let panPointerId = null;
+  let panStartX = 0;
+  let panStartView = 0;
+  let panMoved = false;
+  let pinching = false;
+  let pinchStartDist = 0;
+  let pinchStartPx = 0;
+  let pinchAnchorDay = 0;
+  let lastTapTime = 0;
+  let lastTapX = 0;
+  let lastTapY = 0;
 
-  canvas.addEventListener('mousedown', e => {
-    if (e.button !== 0) return;
-    dragging = true;
-    dragMoved = false;
-    dragStartX = e.clientX;
-    dragStartView = viewStart;
-    canvas.classList.add('dragging');
-  });
-
-  window.addEventListener('mousemove', e => {
+  function canvasPos(e) {
     const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
 
-    if (dragging) {
-      const dx = e.clientX - dragStartX;
-      if (Math.abs(dx) > 3) dragMoved = true;
-      viewStart = dragStartView - dx / pxPerDay;
-      clampView();
-      draw();
-    } else if (cx >= 0 && cx <= W && cy >= 0 && cy <= H) {
-      const hit = hitTestEvent(cx, cy);
-      const newHover = hit ? hit.id : null;
-      if (newHover !== hoverId) {
-        hoverId = newHover;
-        canvas.style.cursor = hoverId ? 'pointer' : 'grab';
-        draw();
-      }
-    } else if (hoverId !== null) {
-      hoverId = null;
-      canvas.style.cursor = 'grab';
-      draw();
+  canvas.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.preventDefault();
+    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (pointers.size === 1) {
+      panPointerId = e.pointerId;
+      panStartX = e.clientX;
+      panStartView = viewStart;
+      panMoved = false;
+      pinching = false;
+      canvas.classList.add('dragging');
+    } else if (pointers.size === 2) {
+      panPointerId = null;
+      pinching = true;
+      const pts = [...pointers.values()];
+      pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      pinchStartPx = pxPerDay;
+      const rect = canvas.getBoundingClientRect();
+      const midX = (pts[0].x + pts[1].x) / 2 - rect.left;
+      pinchAnchorDay = xToDay(midX);
     }
   });
 
-  window.addEventListener('mouseup', e => {
-    if (!dragging) return;
-    dragging = false;
-    canvas.classList.remove('dragging');
-    if (dragMoved) return;
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
-    if (cx < 0 || cx > W || cy < 0 || cy > H) return;
-    const hit = hitTestEvent(cx, cy);
-    if (hit) selectEvent(hit.id);
-    else closeDetail();
+  canvas.addEventListener('pointermove', e => {
+    if (pointers.has(e.pointerId)) {
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (pinching && pointers.size === 2) {
+        const pts = [...pointers.values()];
+        const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        if (pinchStartDist > 0 && dist > 0) {
+          let newPx = pinchStartPx * (dist / pinchStartDist);
+          if (newPx < minPxPerDay) newPx = minPxPerDay;
+          if (newPx > MAX_PX_PER_DAY) newPx = MAX_PX_PER_DAY;
+          pxPerDay = newPx;
+          const rect = canvas.getBoundingClientRect();
+          const midX = (pts[0].x + pts[1].x) / 2 - rect.left;
+          viewStart = pinchAnchorDay - midX / pxPerDay;
+          clampView();
+          draw();
+        }
+      } else if (e.pointerId === panPointerId) {
+        const dx = e.clientX - panStartX;
+        if (Math.abs(dx) > 4) panMoved = true;
+        viewStart = panStartView - dx / pxPerDay;
+        clampView();
+        draw();
+      }
+    } else if (e.pointerType === 'mouse') {
+      const pos = canvasPos(e);
+      if (pos.x >= 0 && pos.x <= W && pos.y >= 0 && pos.y <= H) {
+        const hit = hitTestEvent(pos.x, pos.y);
+        const newHover = hit ? hit.id : null;
+        if (newHover !== hoverId) {
+          hoverId = newHover;
+          canvas.style.cursor = hoverId ? 'pointer' : 'grab';
+          draw();
+        }
+      } else if (hoverId !== null) {
+        hoverId = null;
+        canvas.style.cursor = 'grab';
+        draw();
+      }
+    }
   });
 
+  function endPointer(e) {
+    if (!pointers.has(e.pointerId)) return;
+    const wasPan = e.pointerId === panPointerId;
+    const pos = canvasPos(e);
+    pointers.delete(e.pointerId);
+
+    if (pointers.size === 0) {
+      panPointerId = null;
+      const wasJustPinching = pinching;
+      pinching = false;
+      canvas.classList.remove('dragging');
+
+      if (wasPan && !panMoved && !wasJustPinching) {
+        if (pos.x >= 0 && pos.x <= W && pos.y >= 0 && pos.y <= H) {
+          const hit = hitTestEvent(pos.x, pos.y);
+          if (hit) {
+            selectEvent(hit.id);
+            lastTapTime = 0;
+          } else {
+            const now = Date.now();
+            const isTouch = e.pointerType !== 'mouse';
+            const dt = now - lastTapTime;
+            const dxT = pos.x - lastTapX;
+            const dyT = pos.y - lastTapY;
+            if (isTouch && dt < 320 && Math.hypot(dxT, dyT) < 30) {
+              const day = xToDay(pos.x);
+              if (day >= 0 && day <= TOTAL_DAYS) openAddModal(dayToDate(day));
+              lastTapTime = 0;
+            } else {
+              lastTapTime = now;
+              lastTapX = pos.x;
+              lastTapY = pos.y;
+              closeDetail();
+            }
+          }
+        }
+      }
+    } else if (pointers.size === 1 && pinching) {
+      const [pid] = pointers.keys();
+      const p = pointers.get(pid);
+      panPointerId = pid;
+      panStartX = p.x;
+      panStartView = viewStart;
+      panMoved = true;
+      pinching = false;
+      canvas.classList.add('dragging');
+    }
+  }
+
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+
   canvas.addEventListener('dblclick', e => {
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
-    if (hitTestEvent(cx, cy)) return;
-    const day = xToDay(cx);
+    const pos = canvasPos(e);
+    if (hitTestEvent(pos.x, pos.y)) return;
+    const day = xToDay(pos.x);
     if (day < 0 || day > TOTAL_DAYS) return;
     openAddModal(dayToDate(day));
   });
 
   canvas.addEventListener('wheel', e => {
     e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    const cx = e.clientX - rect.left;
-    const dayAtCursor = xToDay(cx);
+    const pos = canvasPos(e);
+    const dayAtCursor = xToDay(pos.x);
 
     const factor = Math.exp(-e.deltaY * 0.0015);
     pxPerDay *= factor;
     if (pxPerDay < minPxPerDay) pxPerDay = minPxPerDay;
     if (pxPerDay > MAX_PX_PER_DAY) pxPerDay = MAX_PX_PER_DAY;
 
-    viewStart = dayAtCursor - cx / pxPerDay;
+    viewStart = dayAtCursor - pos.x / pxPerDay;
     clampView();
     draw();
   }, { passive: false });
