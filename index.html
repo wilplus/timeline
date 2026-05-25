@@ -121,6 +121,27 @@
     border: 1px solid #e6e6e8;
   }
 
+  /* Sync UI */
+  #syncBtn { display: inline-flex; align-items: center; gap: 6px; }
+  #syncBtn .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #d1d5db; flex-shrink: 0;
+    transition: background 0.15s;
+  }
+  #syncBtn.active .dot { background: #10b981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15); }
+  .modal-hint { font-size: 12px; color: #666; margin: 6px 0; line-height: 1.5; }
+  .modal-divider { text-align: center; color: #aaa; font-size: 11px; margin: 14px 0; letter-spacing: 0.05em; }
+  .code-row { display: flex; gap: 8px; align-items: stretch; }
+  .code-row input {
+    flex: 1; font-family: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace;
+    font-size: 14px; letter-spacing: 0.02em;
+  }
+  .code-row button { white-space: nowrap; padding: 7px 12px; }
+  .modal button.danger {
+    color: #b91c1c; border-color: #fca5a5; background: #fff;
+  }
+  .modal button.danger:hover { background: #fef2f2; }
+
   @media (max-width: 600px) {
     #detail { width: 100%; }
     #hint { font-size: 10px; padding: 5px 8px; }
@@ -139,6 +160,7 @@
   <h1>Timeline</h1>
   <span id="zoomLabel">—</span>
   <div class="spacer"></div>
+  <button id="syncBtn" title="Sync across devices"><span class="dot"></span><span>Sync</span></button>
   <button id="importBtn" title="Import events from a JSON file">Import</button>
   <button id="exportBtn" title="Download all events as JSON">Export</button>
   <button id="fitBtn">Fit all</button>
@@ -178,6 +200,59 @@
   </div>
 </div>
 
+<div class="modal-bg" id="syncModalBg">
+  <div class="modal">
+    <h2>Sync across devices</h2>
+
+    <div id="syncInactiveView">
+      <p class="modal-hint">Sync your events between phone and desktop. Create a new code, or enter one from another device.</p>
+      <button class="primary" id="createCodeBtn" style="width:100%; margin-top: 6px;">Create a new sync code</button>
+      <div class="modal-divider">— OR —</div>
+      <label for="joinCodeInput">Enter an existing code</label>
+      <input type="text" id="joinCodeInput" placeholder="xxxx-xxxx-xxxx" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="off">
+      <button id="joinCodeBtn" style="width:100%; margin-top: 8px;">Join board</button>
+    </div>
+
+    <div id="syncActiveView" style="display:none;">
+      <p class="modal-hint">Synced. Enter this code on your other devices to share events:</p>
+      <div class="code-row">
+        <input type="text" id="currentCode" readonly>
+        <button id="copyCodeBtn">Copy</button>
+      </div>
+      <p class="modal-hint" style="margin-top: 14px;">Anyone with this code can read and write your events — keep it private.</p>
+      <button class="danger" id="disconnectBtn" style="width:100%; margin-top: 8px;">Disconnect</button>
+    </div>
+
+    <div class="err" id="syncErr"></div>
+
+    <div class="buttons">
+      <button id="syncCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCOOcis6NmX-YaqWvHAOQtVEO-a6G5EJFE",
+    authDomain: "timeline-aa2aa.firebaseapp.com",
+    projectId: "timeline-aa2aa",
+    storageBucket: "timeline-aa2aa.firebasestorage.app",
+    messagingSenderId: "761942541178",
+    appId: "1:761942541178:web:15c60abf8ac12d2fbdccc3"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  window.__tlFB = { db, doc, getDoc, setDoc, onSnapshot };
+  window.dispatchEvent(new Event('tl-firebase-ready'));
+</script>
+
 <script>
 (function () {
   'use strict';
@@ -199,6 +274,14 @@
 
   // ===== Persistence (localStorage autosave) =====
   const STORAGE_KEY = 'timeline.events.v1';
+  const SYNC_KEY = 'timeline.syncCode.v1';
+  let syncCode = null;
+  let syncUnsub = null;
+  const clientId = (function () {
+    const arr = new Uint8Array(8);
+    (crypto && crypto.getRandomValues) ? crypto.getRandomValues(arr) : arr.forEach((_, i) => arr[i] = Math.floor(Math.random() * 256));
+    return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+  })();
 
   function saveToStorage() {
     try {
@@ -206,6 +289,7 @@
     } catch (e) {
       console.warn('Save failed:', e);
     }
+    if (syncCode) pushToCloud();
   }
   function loadFromStorage() {
     try {
@@ -949,10 +1033,213 @@
     reader.readAsText(file);
   });
 
+  // ===== Sync (Firestore) =====
+  const syncModalBg = document.getElementById('syncModalBg');
+  const syncInactiveView = document.getElementById('syncInactiveView');
+  const syncActiveView = document.getElementById('syncActiveView');
+  const currentCodeInput = document.getElementById('currentCode');
+  const joinCodeInput = document.getElementById('joinCodeInput');
+  const syncErr = document.getElementById('syncErr');
+
+  syncCode = localStorage.getItem(SYNC_KEY) || null;
+
+  function whenFirebaseReady(fn) {
+    if (window.__tlFB) fn();
+    else window.addEventListener('tl-firebase-ready', fn, { once: true });
+  }
+
+  function updateSyncBtnState() {
+    const btn = document.getElementById('syncBtn');
+    if (!btn) return;
+    if (syncCode) {
+      btn.classList.add('active');
+      btn.title = 'Synced — click to manage';
+    } else {
+      btn.classList.remove('active');
+      btn.title = 'Sync across devices';
+    }
+  }
+
+  function generateSyncCode() {
+    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+    const bytes = new Uint8Array(12);
+    crypto.getRandomValues(bytes);
+    let s = '';
+    for (let i = 0; i < 12; i++) {
+      s += chars[bytes[i] % chars.length];
+      if (i === 3 || i === 7) s += '-';
+    }
+    return s;
+  }
+
+  function applyRemoteData(data) {
+    if (!data || !Array.isArray(data.events)) return false;
+    const incoming = data.events
+      .filter(ev => ev && typeof ev.ts === 'number' && typeof ev.title === 'string')
+      .map(ev => ({
+        id: typeof ev.id === 'number' ? ev.id : 0,
+        ts: ev.ts,
+        title: ev.title,
+        desc: typeof ev.desc === 'string' ? ev.desc : ''
+      }));
+    let maxId = 0;
+    for (const ev of incoming) if (ev.id > maxId) maxId = ev.id;
+    incoming.forEach(ev => { if (!ev.id) ev.id = ++maxId; });
+    events = incoming;
+    nextId = (typeof data.nextId === 'number' && data.nextId > maxId) ? data.nextId : maxId + 1;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ events, nextId })); } catch (_) {}
+    if (selectedId !== null && !events.find(e => e.id === selectedId)) {
+      selectedId = null;
+      detail.classList.remove('open');
+    }
+    return true;
+  }
+
+  async function pushToCloud() {
+    if (!syncCode || !window.__tlFB) return;
+    const { db, doc, setDoc } = window.__tlFB;
+    try {
+      await setDoc(doc(db, 'boards', syncCode), {
+        events: events.map(e => ({ id: e.id, ts: e.ts, title: e.title, desc: e.desc || '' })),
+        nextId,
+        clientId,
+        updatedAt: Date.now()
+      });
+    } catch (e) {
+      console.warn('Cloud push failed:', e);
+    }
+  }
+
+  async function connectSync(code) {
+    syncCode = code;
+    try { localStorage.setItem(SYNC_KEY, code); } catch (_) {}
+    updateSyncBtnState();
+
+    if (!window.__tlFB) {
+      whenFirebaseReady(() => connectSync(code));
+      return;
+    }
+
+    const { db, doc, getDoc, onSnapshot } = window.__tlFB;
+    if (syncUnsub) { try { syncUnsub(); } catch (_) {} syncUnsub = null; }
+    const ref = doc(db, 'boards', code);
+
+    try {
+      const snap = await getDoc(ref);
+      const remoteHasEvents = snap.exists() && Array.isArray(snap.data().events) && snap.data().events.length > 0;
+      if (remoteHasEvents) {
+        applyRemoteData(snap.data());
+        draw();
+      } else if (events.length > 0) {
+        await pushToCloud();
+      }
+    } catch (e) {
+      console.warn('Initial sync failed:', e);
+      if (syncErr) syncErr.textContent = 'Could not connect: ' + (e.message || e);
+    }
+
+    syncUnsub = onSnapshot(ref, snap => {
+      if (!snap.exists()) return;
+      const data = snap.data();
+      if (data.clientId === clientId) return;
+      if (applyRemoteData(data)) draw();
+    }, err => console.warn('Sync listener error:', err));
+  }
+
+  function disconnectSync() {
+    if (syncUnsub) { try { syncUnsub(); } catch (_) {} syncUnsub = null; }
+    syncCode = null;
+    try { localStorage.removeItem(SYNC_KEY); } catch (_) {}
+    updateSyncBtnState();
+  }
+
+  function openSyncModal() {
+    syncErr.textContent = '';
+    if (syncCode) {
+      syncInactiveView.style.display = 'none';
+      syncActiveView.style.display = '';
+      currentCodeInput.value = syncCode;
+    } else {
+      syncInactiveView.style.display = '';
+      syncActiveView.style.display = 'none';
+      joinCodeInput.value = '';
+    }
+    syncModalBg.classList.add('open');
+  }
+  function closeSyncModal() {
+    syncModalBg.classList.remove('open');
+  }
+
+  document.getElementById('syncBtn').addEventListener('click', openSyncModal);
+  document.getElementById('syncCloseBtn').addEventListener('click', closeSyncModal);
+  syncModalBg.addEventListener('click', e => { if (e.target === syncModalBg) closeSyncModal(); });
+
+  document.getElementById('createCodeBtn').addEventListener('click', async () => {
+    syncErr.textContent = '';
+    if (!window.__tlFB) {
+      syncErr.textContent = 'Still connecting to sync server, try again in a moment.';
+      return;
+    }
+    const code = generateSyncCode();
+    await connectSync(code);
+    openSyncModal();
+  });
+
+  document.getElementById('joinCodeBtn').addEventListener('click', async () => {
+    syncErr.textContent = '';
+    const code = joinCodeInput.value.trim().toLowerCase();
+    if (!/^[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/.test(code)) {
+      syncErr.textContent = 'Code format: xxxx-xxxx-xxxx (letters and numbers).';
+      return;
+    }
+    if (!window.__tlFB) {
+      syncErr.textContent = 'Still connecting to sync server, try again in a moment.';
+      return;
+    }
+    const { db, doc, getDoc } = window.__tlFB;
+    try {
+      const snap = await getDoc(doc(db, 'boards', code));
+      const remoteHasEvents = snap.exists() && Array.isArray(snap.data().events) && snap.data().events.length > 0;
+      if (remoteHasEvents && events.length > 0) {
+        const remoteN = snap.data().events.length;
+        if (!confirm('Replace your ' + events.length + ' local event(s) with ' + remoteN + ' from the shared board?')) return;
+      }
+      await connectSync(code);
+      openSyncModal();
+    } catch (e) {
+      syncErr.textContent = 'Could not join: ' + (e.message || e);
+    }
+  });
+
+  document.getElementById('copyCodeBtn').addEventListener('click', () => {
+    const btn = document.getElementById('copyCodeBtn');
+    const orig = btn.textContent;
+    const done = () => {
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(syncCode).then(done).catch(() => {
+        currentCodeInput.select();
+        try { document.execCommand('copy'); done(); } catch (_) {}
+      });
+    } else {
+      currentCodeInput.select();
+      try { document.execCommand('copy'); done(); } catch (_) {}
+    }
+  });
+
+  document.getElementById('disconnectBtn').addEventListener('click', () => {
+    if (!confirm('Disconnect from the shared board? Your local events will remain on this device.')) return;
+    disconnectSync();
+    openSyncModal();
+  });
+
   // ===== Keyboard =====
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       if (modalBg.classList.contains('open')) closeModal();
+      else if (syncModalBg.classList.contains('open')) closeSyncModal();
       else if (detail.classList.contains('open')) closeDetail();
     }
   });
@@ -961,6 +1248,10 @@
   loadFromStorage();
   resize();
   fitAll();
+  updateSyncBtnState();
+  if (syncCode) {
+    whenFirebaseReady(() => connectSync(syncCode));
+  }
 })();
 </script>
 </body>
