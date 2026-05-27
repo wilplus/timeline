@@ -142,6 +142,37 @@
   }
   .modal button.danger:hover { background: #fef2f2; }
 
+  /* Category UI */
+  .category-row { display: flex; gap: 8px; align-items: stretch; }
+  .category-row input[type="text"] { flex: 1; min-width: 0; }
+  .category-row input[type="color"] {
+    width: 44px; padding: 2px; border-radius: 7px;
+    border: 1px solid #d4d4d8; cursor: pointer;
+    background: #fff;
+  }
+  .cat-btn {
+    display: block; margin-top: 8px; width: 100%;
+    background: #fff; border: 1px solid #d4d4d8;
+    padding: 8px 12px; border-radius: 7px;
+    font-size: 12px; color: #555; cursor: pointer;
+    font-family: inherit;
+  }
+  .cat-btn:hover { background: #f5f5f7; }
+  .cat-btn.is-hidden {
+    color: #b91c1c; border-color: #fca5a5; background: #fef2f2;
+  }
+  .cat-btn.is-hidden:hover { background: #fde6e6; }
+
+  #detailCategory {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: #555; margin: -8px 0 14px;
+  }
+  #detailCategory.empty { display: none; }
+  #detailCategory .swatch {
+    width: 10px; height: 10px; border-radius: 50%;
+    flex-shrink: 0; border: 1px solid rgba(0,0,0,0.1);
+  }
+
   @media (max-width: 600px) {
     #detail { width: 100%; }
     #hint { font-size: 10px; padding: 5px 8px; }
@@ -181,6 +212,13 @@
     <input type="text" id="evTitle" placeholder="e.g. Project kickoff" maxlength="120">
     <label for="evDesc">Description (optional)</label>
     <textarea id="evDesc" placeholder="Notes, details, links…" maxlength="2000"></textarea>
+    <label for="evCategoryName">Category (optional)</label>
+    <div class="category-row">
+      <input type="text" id="evCategoryName" list="categoryList" placeholder="e.g. Work, Personal, Travel" maxlength="60" autocomplete="off">
+      <input type="color" id="evCategoryColor" value="#6b7280" title="Category color">
+    </div>
+    <datalist id="categoryList"></datalist>
+    <button type="button" id="hideCategoryBtn" class="cat-btn" style="display:none;">Hide all events in this category</button>
     <div class="err" id="evErr"></div>
     <div class="buttons">
       <button id="cancelBtn">Cancel</button>
@@ -193,6 +231,10 @@
   <button class="close" id="detailClose" aria-label="Close">×</button>
   <h3 id="detailTitle"></h3>
   <div class="date" id="detailDate"></div>
+  <div id="detailCategory" class="empty">
+    <span class="swatch"></span>
+    <span class="name"></span>
+  </div>
   <div class="desc" id="detailDesc"></div>
   <div class="actions">
     <button id="editBtn">Edit</button>
@@ -275,8 +317,10 @@
   // ===== Persistence (localStorage autosave) =====
   const STORAGE_KEY = 'timeline.events.v1';
   const SYNC_KEY = 'timeline.syncCode.v1';
+  const HIDDEN_CATS_KEY = 'timeline.hiddenCategories.v1';
   let syncCode = null;
   let syncUnsub = null;
+  let hiddenCategories = new Set();
   const clientId = (function () {
     const arr = new Uint8Array(8);
     (crypto && crypto.getRandomValues) ? crypto.getRandomValues(arr) : arr.forEach((_, i) => arr[i] = Math.floor(Math.random() * 256));
@@ -303,7 +347,9 @@
           id: typeof ev.id === 'number' ? ev.id : 0,
           ts: ev.ts,
           title: ev.title,
-          desc: typeof ev.desc === 'string' ? ev.desc : ''
+          desc: typeof ev.desc === 'string' ? ev.desc : '',
+          categoryName: typeof ev.categoryName === 'string' ? ev.categoryName : '',
+          categoryColor: typeof ev.categoryColor === 'string' ? ev.categoryColor : ''
         }));
       let maxId = 0;
       for (const ev of events) if (ev.id > maxId) maxId = ev.id;
@@ -312,6 +358,26 @@
       if (nextId <= maxId) nextId = maxId + 1;
     } catch (e) {
       console.warn('Load failed:', e);
+    }
+  }
+
+  function loadHiddenCategories() {
+    try {
+      const raw = localStorage.getItem(HIDDEN_CATS_KEY);
+      if (!raw) return;
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        hiddenCategories = new Set(arr.filter(s => typeof s === 'string'));
+      }
+    } catch (e) {
+      console.warn('Load hidden cats failed:', e);
+    }
+  }
+  function saveHiddenCategories() {
+    try {
+      localStorage.setItem(HIDDEN_CATS_KEY, JSON.stringify([...hiddenCategories]));
+    } catch (e) {
+      console.warn('Save hidden cats failed:', e);
     }
   }
 
@@ -508,7 +574,9 @@
   function layoutEvents() {
     const placed = [];
     const lanes = [];
-    const sorted = [...events].sort((a, b) => a.ts - b.ts);
+    const sorted = events
+      .filter(ev => !ev.categoryName || !hiddenCategories.has(ev.categoryName))
+      .sort((a, b) => a.ts - b.ts);
 
     ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
 
@@ -613,15 +681,20 @@
       const evY = FIRST_LANE_Y + p.lane * LANE_H;
       const isSel = p.ev.id === selectedId;
       const isHover = p.ev.id === hoverId;
+      const catColor = p.ev.categoryColor || '';
 
-      ctx.strokeStyle = isSel ? '#1f6feb' : (isHover ? '#3b82f6' : '#9ca3af');
+      const lineColor = isSel ? '#1f6feb' : (isHover ? '#3b82f6' : (catColor || '#9ca3af'));
+      const dotColor = isSel ? '#1f6feb' : (isHover ? '#3b82f6' : (catColor || '#6b7280'));
+      const borderColor = isSel ? '#1f6feb' : (catColor || '#d4d4d8');
+
+      ctx.strokeStyle = lineColor;
       ctx.lineWidth = isSel ? 1.5 : 1;
       ctx.beginPath();
       ctx.moveTo(p.x + 0.5, AXIS_Y + 1);
       ctx.lineTo(p.x + 0.5, evY + 9);
       ctx.stroke();
 
-      ctx.fillStyle = isSel ? '#1f6feb' : (isHover ? '#3b82f6' : '#6b7280');
+      ctx.fillStyle = dotColor;
       ctx.beginPath();
       ctx.arc(p.x, AXIS_Y, isSel || isHover ? 4 : 3, 0, Math.PI * 2);
       ctx.fill();
@@ -630,8 +703,8 @@
       const pillY = evY;
       const pillH = 19;
       ctx.fillStyle = isSel ? '#1f6feb' : '#ffffff';
-      ctx.strokeStyle = isSel ? '#1f6feb' : '#d4d4d8';
-      ctx.lineWidth = 1;
+      ctx.strokeStyle = borderColor;
+      ctx.lineWidth = (catColor && !isSel) ? 1.5 : 1;
       roundRect(ctx, pillX, pillY, p.pillW, pillH, 4);
       ctx.fill();
       ctx.stroke();
@@ -889,7 +962,60 @@
   const evDate = document.getElementById('evDate');
   const evTitle = document.getElementById('evTitle');
   const evDesc = document.getElementById('evDesc');
+  const evCategoryName = document.getElementById('evCategoryName');
+  const evCategoryColor = document.getElementById('evCategoryColor');
+  const hideCategoryBtn = document.getElementById('hideCategoryBtn');
   const evErr = document.getElementById('evErr');
+
+  function populateCategoryDatalist() {
+    const datalist = document.getElementById('categoryList');
+    const names = new Set();
+    for (const ev of events) {
+      if (ev.categoryName) names.add(ev.categoryName);
+    }
+    datalist.innerHTML = '';
+    for (const name of [...names].sort()) {
+      const opt = document.createElement('option');
+      opt.value = name;
+      datalist.appendChild(opt);
+    }
+  }
+
+  function updateHideCategoryButton() {
+    const name = evCategoryName.value.trim();
+    if (!name) {
+      hideCategoryBtn.style.display = 'none';
+      return;
+    }
+    hideCategoryBtn.style.display = '';
+    if (hiddenCategories.has(name)) {
+      hideCategoryBtn.classList.add('is-hidden');
+      hideCategoryBtn.textContent = 'Show events in "' + name + '"';
+    } else {
+      hideCategoryBtn.classList.remove('is-hidden');
+      hideCategoryBtn.textContent = 'Hide all events in "' + name + '"';
+    }
+  }
+
+  evCategoryName.addEventListener('input', updateHideCategoryButton);
+  evCategoryName.addEventListener('change', () => {
+    const name = evCategoryName.value.trim();
+    if (!name) return;
+    const existing = events.find(e => e.categoryName === name && e.id !== editingId);
+    if (existing && existing.categoryColor) {
+      evCategoryColor.value = existing.categoryColor;
+    }
+  });
+
+  hideCategoryBtn.addEventListener('click', () => {
+    const name = evCategoryName.value.trim();
+    if (!name) return;
+    if (hiddenCategories.has(name)) hiddenCategories.delete(name);
+    else hiddenCategories.add(name);
+    saveHiddenCategories();
+    updateHideCategoryButton();
+    draw();
+  });
 
   function openAddModal(prefillDate) {
     editingId = null;
@@ -898,6 +1024,10 @@
     evDate.value = isoDate(d);
     evTitle.value = '';
     evDesc.value = '';
+    evCategoryName.value = '';
+    evCategoryColor.value = '#6b7280';
+    populateCategoryDatalist();
+    updateHideCategoryButton();
     evErr.textContent = '';
     modalBg.classList.add('open');
     setTimeout(() => evTitle.focus(), 50);
@@ -908,6 +1038,10 @@
     evDate.value = isoDate(new Date(ev.ts));
     evTitle.value = ev.title;
     evDesc.value = ev.desc || '';
+    evCategoryName.value = ev.categoryName || '';
+    evCategoryColor.value = ev.categoryColor || '#6b7280';
+    populateCategoryDatalist();
+    updateHideCategoryButton();
     evErr.textContent = '';
     modalBg.classList.add('open');
     setTimeout(() => evTitle.focus(), 50);
@@ -927,15 +1061,23 @@
       return;
     }
     const desc = evDesc.value.trim();
+    const categoryName = evCategoryName.value.trim();
+    const categoryColor = categoryName ? evCategoryColor.value : '';
     if (editingId) {
       const idToEdit = editingId;
       const ev = events.find(e => e.id === idToEdit);
-      if (ev) { ev.ts = date.getTime(); ev.title = title; ev.desc = desc; }
+      if (ev) {
+        ev.ts = date.getTime();
+        ev.title = title;
+        ev.desc = desc;
+        ev.categoryName = categoryName;
+        ev.categoryColor = categoryColor;
+      }
       const wasSelected = selectedId === idToEdit;
       closeModal();
       if (wasSelected) selectEvent(idToEdit);
     } else {
-      const newEv = { id: nextId++, ts: date.getTime(), title, desc };
+      const newEv = { id: nextId++, ts: date.getTime(), title, desc, categoryName, categoryColor };
       events.push(newEv);
       closeModal();
     }
@@ -961,6 +1103,14 @@
     if (!ev) { closeDetail(); return; }
     detailTitle.textContent = ev.title;
     detailDate.textContent = fmtFullDate(new Date(ev.ts));
+    const catEl = document.getElementById('detailCategory');
+    if (ev.categoryName) {
+      catEl.classList.remove('empty');
+      catEl.querySelector('.swatch').style.background = ev.categoryColor || '#6b7280';
+      catEl.querySelector('.name').textContent = ev.categoryName;
+    } else {
+      catEl.classList.add('empty');
+    }
     if (ev.desc) {
       detailDesc.textContent = ev.desc;
       detailDesc.classList.remove('empty');
@@ -1043,7 +1193,9 @@
             id,
             ts: ev.ts,
             title: String(ev.title).slice(0, 200),
-            desc: typeof ev.desc === 'string' ? ev.desc.slice(0, 5000) : ''
+            desc: typeof ev.desc === 'string' ? ev.desc.slice(0, 5000) : '',
+            categoryName: typeof ev.categoryName === 'string' ? ev.categoryName.slice(0, 60) : '',
+            categoryColor: typeof ev.categoryColor === 'string' ? ev.categoryColor : ''
           };
         });
         events.forEach(ev => { if (!ev.id) ev.id = ++maxId; });
@@ -1107,7 +1259,9 @@
         id: typeof ev.id === 'number' ? ev.id : 0,
         ts: ev.ts,
         title: ev.title,
-        desc: typeof ev.desc === 'string' ? ev.desc : ''
+        desc: typeof ev.desc === 'string' ? ev.desc : '',
+        categoryName: typeof ev.categoryName === 'string' ? ev.categoryName : '',
+        categoryColor: typeof ev.categoryColor === 'string' ? ev.categoryColor : ''
       }));
     let maxId = 0;
     for (const ev of incoming) if (ev.id > maxId) maxId = ev.id;
@@ -1127,7 +1281,11 @@
     const { db, doc, setDoc } = window.__tlFB;
     try {
       await setDoc(doc(db, 'boards', syncCode), {
-        events: events.map(e => ({ id: e.id, ts: e.ts, title: e.title, desc: e.desc || '' })),
+        events: events.map(e => ({
+          id: e.id, ts: e.ts, title: e.title, desc: e.desc || '',
+          categoryName: e.categoryName || '',
+          categoryColor: e.categoryColor || ''
+        })),
         nextId,
         clientId,
         updatedAt: Date.now()
@@ -1273,6 +1431,7 @@
 
   // ===== Boot =====
   loadFromStorage();
+  loadHiddenCategories();
   resize();
   focusOnToday();
   updateSyncBtnState();
