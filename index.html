@@ -643,6 +643,23 @@
       ctx.fillText(displayText, pillX + 7, pillY + pillH / 2 + 0.5);
     }
 
+    // Today marker (red dot on axis)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayDay = (today - MIN_DATE) / MS_PER_DAY;
+    if (todayDay >= -2 && todayDay <= TOTAL_DAYS + 2) {
+      const todayX = dayToX(todayDay);
+      if (todayX >= -10 && todayX <= W + 10) {
+        ctx.fillStyle = '#ef4444';
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(todayX, AXIS_Y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
     // Zoom label
     const visible = W / pxPerDay;
     document.getElementById('zoomLabel').textContent =
